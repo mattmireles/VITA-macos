@@ -1,3 +1,87 @@
+"""
+VITA Multimodal Data Processing - Core data utilities for VITA vision-audio-text integration.
+
+This module implements the fundamental multimodal data processing pipeline for VITA,
+handling the complex integration of vision, audio, and text modalities in training
+and inference scenarios. It provides the foundational data structures and processing
+functions that enable VITA's advanced multimodal understanding capabilities.
+
+=== VITA MULTIMODAL FLOW PATTERNS ===
+
+Complete Multimodal Processing Pipeline (Vision → Audio → Text → TTS):
+
+1. INPUT STAGE - Raw Multimodal Data:
+   • Vision: Images/Videos → decord.VideoReader → PIL.Image frames
+   • Audio: Speech/Sound files → audio loading → waveform tensors
+   • Text: User prompts with <image>/<audio> placeholders
+
+2. PREPROCESSING STAGE - Format Standardization:
+   • Vision: Frame sampling → aspect ratio handling → square padding
+   • Audio: Resampling → length normalization → feature extraction
+   • Text: Tokenization → special token replacement → conversation formatting
+
+3. ENCODING STAGE - Multimodal Feature Extraction:
+   • Vision: InternViT-300M-448px → spatial features → vision projector → LLM embeddings
+   • Audio: Whale encoder → temporal features → audio adapter → LLM embeddings
+   • Text: Tokenizer → embedding layer → LLM embeddings
+
+4. FUSION STAGE - Multimodal Token Integration:
+   • Token Replacement: <image>/<audio> tokens → actual multimodal embeddings
+   • Sequence Alignment: Unified embedding sequence for transformer processing
+   • Attention Masking: Proper attention patterns for multimodal content
+
+5. PROCESSING STAGE - Language Model Forward Pass:
+   • Transformer Layers: Multi-head attention over fused multimodal embeddings
+   • Causal Language Modeling: Next token prediction with multimodal context
+   • Generation: Autoregressive text generation conditioned on multimodal input
+
+6. OUTPUT STAGE - Response Generation:
+   • Text Generation: Token-by-token generation with stopping criteria
+   • TTS Integration: Text → VITA TTS model → speech synthesis
+   • Multimodal Response: Coordinated text and speech output
+
+=== KEY INTEGRATION POINTS ===
+
+Critical Data Flow Connections:
+• vita/util/mm_utils.py: Multimodal token processing and replacement
+• vita/model/vita_arch.py: Core multimodal fusion and processing
+• vita/model/builder.py: Model initialization and component loading
+• vita/conversation.py: Conversation state and format management
+• vita/constants.py: System-wide constants and configuration
+
+=== TENSOR SHAPES AND ML-SPECIFIC DETAILS ===
+
+Tensor Flow Through Pipeline:
+1. Raw Images: (batch, channels=3, height, width) → typically (B, 3, H, W)
+2. Vision Features: (batch, num_patches, feature_dim) → (B, 256, 4096) for InternViT
+3. Audio Waveforms: (batch, sequence_length) → (B, sample_rate * duration)
+4. Audio Features: (batch, time_steps, feature_dim) → (B, T, 1024) for Whale encoder
+5. Text Tokens: (batch, sequence_length) → (B, max_seq_len) with padding
+6. Fused Embeddings: (batch, total_seq_len, hidden_size) → (B, L, 4096) for LLM input
+
+Device Placement Strategy:
+• GPU 0: Embedding layers, early transformer layers, audio encoder
+• GPU 1: Later transformer layers, vision tower, projectors, LM head
+• CPU: Data loading, preprocessing, tokenization (before GPU transfer)
+
+Memory Management:
+• Gradient checkpointing for large models (Mixtral-8x7B)
+• Mixed precision training (FP16/BF16) for efficiency
+• Dynamic batching based on sequence length and multimodal content
+
+Called by:
+- Training scripts for multimodal data preparation
+- Inference pipelines for consistent data processing
+- Evaluation frameworks for benchmark processing
+- Web demos for real-time multimodal interaction
+
+Flow continues to:
+- Model forward passes with fused multimodal representations
+- Training optimization with multimodal loss computation
+- Text generation with multimodal context understanding
+- TTS synthesis for complete multimodal response generation
+"""
+
 import copy
 import json
 import math

@@ -1,3 +1,33 @@
+"""
+VITA Model Architecture - Core multimodal model classes for VITA (Vision-Instruction-Tuning-Audio).
+
+This module contains the fundamental architecture components that enable VITA to process
+vision, audio, and text inputs simultaneously. The architecture handles complex multimodal
+fusion through specialized encoding, projection, and attention mechanisms.
+
+Core Components:
+- VITAMetaModel: Base model class for multimodal component initialization
+- VITAMetaForCausalLM: Abstract base for causal language modeling with multimodal support
+- Slow-Fast video processing for efficient long video understanding
+- Dynamic multimodal token fusion and alignment
+
+Called by:
+- vita/model/builder.py load_pretrained_model() during model initialization
+- vita/model/language_model/* - Specific model implementations (Mixtral, Qwen2, etc.)
+- Training scripts in script/train/ for model training
+
+Flow continues to:
+- Transformer language model forward passes
+- TTS generation in vita/model/vita_tts/ for speech output
+- Conversation management in vita/conversation.py
+
+Multimodal Processing Pipeline:
+1. Vision: Images/Videos → InternViT → Vision Projector → Language Model Embeddings
+2. Audio: Speech → Whale Audio Encoder → Audio Adapter → Language Model Embeddings  
+3. Text: Tokens → Embedding Layer → Language Model Embeddings
+4. Fusion: All modalities combined in unified embedding space for transformer processing
+"""
+
 import math
 from abc import ABC, abstractmethod
 
@@ -10,32 +40,183 @@ from .multimodal_encoder.builder import build_audio_encoder, build_vision_tower
 from .multimodal_projector.builder import build_vision_projector
 import numpy as np
 
+# Video processing constants for slow-fast temporal pooling
+# These values balance token count with temporal detail preservation
+class VideoProcessingConstants:
+    """Constants for VITA video processing and temporal pooling strategies."""
+    
+    # Maximum tokens per frame to maintain reasonable context window usage
+    # 256 tokens = 16x16 spatial resolution, good for detailed scenes
+    # 49 tokens = 7x7 spatial resolution, sufficient for motion understanding  
+    MAX_SLOW_TOKENS = 256  # High-detail tokens for key frames
+    MAX_FAST_TOKENS = 49   # Reduced tokens for temporal frames
+    
+    # Token budgets for different video lengths to stay within context limits
+    LONG_VIDEO_TOKEN_BUDGET = 5200  # Maximum tokens for videos > 30 frames
+    MEDIUM_VIDEO_TOKEN_BUDGET = 4096  # Maximum tokens for videos 28-40 frames
+    
+    # Pooling grid sizes (must be perfect squares for spatial arrangement)
+    POOLING_SIZES = [256, 225, 196, 169, 144, 81, 49, 36]  # 16x16 down to 6x6
+    
+    # Slow-fast sampling strategies
+    SLOW_FAST_STRIDE_4 = 4   # Sample every 4th frame as slow (high detail)
+    SLOW_FAST_STRIDE_16 = 16 # Sample every 16th frame as slow (very sparse)
+
 class VITAMetaModel:
+    """
+    Base VITA multimodal model class handling vision and audio component initialization.
+    
+    This class serves as the foundation for all VITA model variants, managing the setup
+    and integration of multimodal encoders (vision and audio) with the language model.
+    It handles the complex initialization process including encoder loading, projector
+    setup, and cross-modal alignment.
+    
+    Called by:
+    - vita/model/language_model/vita_*qwen2.py during model instantiation
+    - vita/model/language_model/vita_arch.py for Mixtral and Mistral variants
+    - Training scripts when initializing multimodal capabilities
+    
+    The initialization process:
+    - Vision: InternViT-300M-448px → Vision Projector → LLM embedding space
+    - Audio: Whale Audio Encoder → Audio Adapter → LLM embedding space
+    - Both modalities align to the same dimensional space as text embeddings
+    
+    Flow continues to:
+    - prepare_inputs_labels_for_multimodal() for input processing
+    - Language model forward passes with fused multimodal embeddings
+    - TTS generation for speech output synthesis
+    """
+    
     def __init__(self, config):
+        """
+        Initialize VITA multimodal model with vision and audio components.
+        
+        This constructor sets up the core multimodal infrastructure based on the
+        provided configuration. It conditionally initializes vision and audio
+        components only if specified in the config, allowing for flexible
+        model variants (vision-only, audio-only, or full multimodal).
+        
+        Args:
+            config: Model configuration object containing:
+                - mm_vision_tower: Path to vision encoder (InternViT-300M-448px)
+                - mm_audio_encoder: Path to audio encoder (Whale-based)
+                - continuous_training: Flag for training mode behavior
+                - mm_projector_type: Type of vision projector ("mlp2x_gelu")
+                - Other model-specific parameters
+        
+        Sets up:
+            - self.vision_tower: InternViT vision encoder for image/video processing
+            - self.mm_projector: MLP projector mapping vision features to LLM space
+            - self.audio_encoder: Whale audio encoder for speech processing
+        
+        Called during model instantiation in load_pretrained_model().
+        """
         super(VITAMetaModel, self).__init__(config)
 
+        # Initialize vision components if specified in config
+        # Vision tower handles image and video encoding via InternViT-300M-448px
         if hasattr(config, "mm_vision_tower"):
             self.vision_tower = build_vision_tower(
-                config, delay_load=False#not getattr(config, "continuous_training", False)
+                config, delay_load=False  # Load immediately for faster inference
             )
+            # Disable continuous training flag after vision tower initialization
+            # This ensures proper model state for inference
             if getattr(config, "continuous_training", False):
                 config.continuous_training = False
+            # Vision projector maps vision features to language model embedding space
             self.mm_projector = build_vision_projector(config)
 
+        # Initialize audio components if specified in config
+        # Audio encoder handles speech input via Whale-based architecture
         if hasattr(config, "mm_audio_encoder"):
             self.audio_encoder = build_audio_encoder(config)
 
     def get_vision_tower(self):
+        """
+        Retrieve the vision tower encoder for image/video processing.
+        
+        This method provides safe access to the vision tower component with
+        proper handling of edge cases (list format, None values). The vision
+        tower is responsible for encoding images and video frames into feature
+        representations.
+        
+        Called by:
+        - encode_images() for image feature extraction
+        - prepare_inputs_labels_for_multimodal() during input processing
+        - load_pretrained_model() for vision tower loading and configuration
+        
+        Returns:
+            vision_tower: InternViT-300M-448px encoder instance or None
+                        Handles list format by returning first element
+        
+        Flow continues to:
+        - vision_tower(images) for feature extraction
+        - mm_projector(features) for embedding space alignment
+        """
         vision_tower = getattr(self, "vision_tower", None)
+        # Handle list format (some configurations store as list)
         if type(vision_tower) is list:
             vision_tower = vision_tower[0]
         return vision_tower
 
     def get_audio_encoder(self):
+        """
+        Retrieve the audio encoder for speech processing.
+        
+        This method provides access to the Whale-based audio encoder that
+        processes speech inputs and converts them to embeddings compatible
+        with the language model's embedding space.
+        
+        Called by:
+        - prepare_inputs_labels_for_multimodal() during multimodal input processing
+        - Audio feature extraction in training and inference pipelines
+        - TTS generation pipeline for speech synthesis
+        
+        Returns:
+            audio_encoder: Whale-based audio encoder instance or None
+                          Includes adapter layers for LLM embedding alignment
+        
+        Flow continues to:
+        - audio_encoder(audio_data, lengths) for speech feature extraction
+        - Audio adapter processing for embedding space alignment
+        """
         audio_encoder = getattr(self, "audio_encoder", None)
         return audio_encoder
 
     def initialize_vision_modules(self, model_args):
+        """
+        Initialize vision processing components with pretrained weights.
+        
+        This method sets up the complete vision pipeline including the vision tower
+        (InternViT-300M-448px) and the multimodal projector that maps vision features
+        to the language model's embedding space. It handles both fresh initialization
+        and loading of pretrained adapters.
+        
+        Called by:
+        - vita/model/builder.py load_pretrained_model() during model setup
+        - Training scripts when initializing vision capabilities
+        - Model loading with base models + vision components
+        
+        Vision Pipeline Setup:
+        1. Vision Tower: InternViT-300M-448px for image/video encoding
+        2. MM Projector: MLP layers mapping vision features → LLM embeddings
+        3. Pretrained Adapter Loading: If specified, load pretrained projector weights
+        
+        Args:
+            model_args: Configuration object containing:
+                - vision_tower: Path to InternViT-300M-448px model
+                - pretrain_mm_mlp_adapter: Optional path to pretrained projector weights
+                - mm_projector_type: Projector architecture ("mlp2x_gelu")
+                
+        Sets up:
+        - self.vision_tower: Loaded InternViT vision encoder
+        - self.mm_projector: Vision-to-LLM projector with proper dimensions
+        - self.config: Updated with vision-related configuration parameters
+        
+        Flow continues to:
+        - encode_images() for vision feature extraction
+        - prepare_inputs_labels_for_multimodal() for input fusion
+        """
         vision_tower = model_args.vision_tower
 
         pretrain_mm_mlp_adapter = model_args.pretrain_mm_mlp_adapter
@@ -69,6 +250,44 @@ class VITAMetaModel:
             self.mm_projector.load_state_dict(get_w(mm_projector_weights, "mm_projector"))
 
     def initialize_audio_modules(self, model_args):
+        """
+        Initialize audio processing components with Whale-based encoder.
+        
+        This method sets up the complete audio pipeline including the Whale audio
+        encoder and associated adapters that process speech inputs and align them
+        with the language model's embedding space. It handles loading of pretrained
+        audio encoder weights from safetensors format.
+        
+        Called by:
+        - vita/model/builder.py load_pretrained_model() during model setup
+        - Training scripts when initializing audio capabilities  
+        - Model loading with base models + audio components
+        
+        Audio Pipeline Setup:
+        1. Audio Encoder: Whale-based architecture for speech feature extraction
+        2. Audio Adapter: MLP layers mapping audio features → LLM embeddings
+        3. Pretrained Weight Loading: Load audio encoder weights from safetensors
+        4. Optional Adapter Loading: If specified, load pretrained adapter weights
+        
+        Args:
+            model_args: Configuration object containing:
+                - audio_encoder: Path to Whale audio encoder model
+                - pretrain_audio_mlp_adapter: Optional path to pretrained adapter weights
+                - model_name_or_path: Path to model directory containing safetensors files
+                
+        Sets up:
+        - self.audio_encoder: Loaded Whale audio encoder with adapter layers
+        - self.config: Updated with audio-related configuration parameters
+        
+        Weight Loading Process:
+        - Scans model directory for .safetensors files
+        - Extracts keys starting with 'model.audio_encoder.'
+        - Loads weights with strict=True for exact parameter matching
+        
+        Flow continues to:
+        - audio_encoder(audio_data, lengths) for speech feature extraction
+        - prepare_inputs_labels_for_multimodal() for multimodal input fusion
+        """
         audio_encoder = model_args.audio_encoder
 
         pretrain_audio_mlp_adapter = model_args.pretrain_audio_mlp_adapter
@@ -133,33 +352,160 @@ class VITAMetaModel:
 
 
 class VITAMetaForCausalLM(ABC):
+    """
+    Abstract base class for VITA causal language models with multimodal support.
+    
+    This class provides the interface and shared functionality for all VITA model
+    variants that perform causal language modeling with integrated vision and audio
+    processing. It defines the contract for multimodal input processing, feature
+    encoding, and the complex token fusion required for VITA's capabilities.
+    
+    Implemented by:
+    - VITAMixtralForCausalLM: Mixtral-8x7B based implementation
+    - VITAQwen2ForCausalLM: Qwen2.5-based implementation  
+    - VITAMistralForCausalLM: Mistral-based Nemo implementation
+    
+    Core Capabilities:
+    - Multimodal input processing (vision + audio + text)
+    - Slow-fast video processing for efficient long video understanding
+    - Dynamic token fusion and alignment across modalities
+    - Causal language modeling with multimodal context
+    
+    Used by:
+    - video_audio_demo.py for inference and demonstration
+    - Training scripts for multimodal model training
+    - Web demo for real-time multimodal interaction
+    """
+    
     @abstractmethod
     def get_model(self):
+        """
+        Abstract method to retrieve the underlying model instance.
+        
+        Must be implemented by concrete VITA model classes to provide access
+        to the base language model (Mixtral, Qwen2, etc.) for multimodal processing.
+        
+        Returns:
+            The underlying language model instance with multimodal capabilities
+        """
         pass
 
     def get_vision_tower(self):
+        """
+        Retrieve vision tower through the underlying model.
+        
+        Provides access to the InternViT-300M-448px vision encoder via the
+        base model's interface. This is the primary entry point for vision
+        processing capabilities.
+        
+        Returns:
+            InternViT vision tower for image/video feature extraction
+        """
         return self.get_model().get_vision_tower()
 
     def get_audio_encoder(self):
+        """
+        Retrieve audio encoder through the underlying model.
+        
+        Provides access to the Whale-based audio encoder via the base model's
+        interface. This is the primary entry point for speech processing
+        capabilities.
+        
+        Returns:
+            Whale audio encoder with adapter layers for speech feature extraction
+        """
         return self.get_model().get_audio_encoder()
 
     def pool_feats(self, x, out_size):
+        """
+        Spatially pool vision features to reduce token count while preserving information.
+        
+        This method performs bilinear interpolation on vision features arranged in a
+        spatial grid to reduce the number of tokens per frame. Critical for managing
+        context window limits when processing long videos or high-resolution images.
+        
+        Called by:
+        - slow_fast_pooling*() methods for video temporal processing
+        - Video processing pipelines to balance detail vs. efficiency
+        
+        Pooling Process:
+        1. Reshape tokens to spatial grid (assumes square arrangement)
+        2. Apply bilinear interpolation to target resolution
+        3. Reshape back to token sequence format
+        
+        Args:
+            x (torch.Tensor): Vision features of shape (batch, num_tokens, channels)
+                            or (num_tokens, channels). Assumes num_tokens is perfect square.
+            out_size (tuple): Target spatial dimensions (height, width)
+                            E.g., (7, 7) for 49 tokens, (12, 12) for 144 tokens
+        
+        Returns:
+            torch.Tensor: Pooled features with shape (batch, height*width, channels)
+                         or (height*width, channels) matching input batch dimensions
+        
+        Token Count Examples:
+        - (256, 4096) → pool_feats(x, (7, 7)) → (49, 4096)  # 16x16 to 7x7
+        - (144, 4096) → pool_feats(x, (6, 6)) → (36, 4096)  # 12x12 to 6x6
+        """
         ndim = x.ndim
+        # Handle 2D input by adding batch dimension
         if ndim == 2:
             x = x.unsqueeze(0)
+        
         b, num_tokens, c = x.shape
+        # Assume square spatial arrangement of tokens
         h = int(math.sqrt(num_tokens))
+        
+        # Reshape to spatial format for interpolation: (batch, channels, height, width)
         x = x.permute(0, 2, 1).reshape(b, -1, h, h)
+        
+        # Apply bilinear interpolation to target size
         x = F.interpolate(x, size=out_size, mode='bilinear', align_corners=False)
-        num_tokens = x.shape[2] * x.shape[3]  # Recalculate the number of tokens after pooling
+        
+        # Reshape back to token sequence format
+        num_tokens = x.shape[2] * x.shape[3]  # New token count after pooling
         x = x.reshape(b, c, num_tokens).permute(0, 2, 1)
+        
+        # Remove batch dimension if input was 2D
         if ndim == 2:
             x = x.squeeze(0)
         return x
 
     def encode_images(self, images):
+        """
+        Encode images through the vision pipeline: Vision Tower → Projector → LLM space.
+        
+        This method processes images or video frames through the complete vision
+        encoding pipeline, producing embeddings compatible with the language model's
+        embedding space for multimodal fusion.
+        
+        Called by:
+        - prepare_inputs_labels_for_multimodal() during input processing
+        - Video processing pipelines for frame encoding
+        - Training loops for vision-language alignment
+        
+        Vision Pipeline:
+        1. InternViT-300M-448px extracts spatial features from images
+        2. MM Projector (MLP) maps vision features to LLM embedding dimensions
+        3. Output embeddings ready for fusion with text tokens
+        
+        Args:
+            images (torch.Tensor): Batch of images with shape (batch, channels, height, width)
+                                  Typically (batch, 3, 448, 448) for InternViT input
+        
+        Returns:
+            torch.Tensor: Image embeddings in LLM space with shape (batch, num_patches, hidden_size)
+                         Ready for integration with text token embeddings
+        
+        Flow continues to:
+        - Token fusion in prepare_inputs_labels_for_multimodal()
+        - Language model forward pass with multimodal embeddings
+        """
+        # Extract visual features using InternViT-300M-448px vision tower
         image_features = self.get_model().get_vision_tower()(images)
-        #image_features = self.pool_feats(image_features)
+        
+        # Project vision features to language model embedding space
+        # This alignment is critical for multimodal fusion
         image_features = self.get_model().mm_projector(image_features)
         return image_features
 
@@ -308,6 +654,59 @@ class VITAMetaForCausalLM(ABC):
     def prepare_inputs_labels_for_multimodal(
         self, input_ids, position_ids, attention_mask, past_key_values, labels, images, audios, sf_masks, shared_v_pid_stride=None
     ):
+        """
+        Core multimodal input processing - fuses vision, audio, and text into unified embeddings.
+        
+        This is the most critical method in VITA's architecture. It handles the complex process
+        of combining embeddings from three modalities (vision, audio, text) into a unified
+        sequence that can be processed by the transformer language model. The method manages
+        token replacement, sequence alignment, padding, and maintains causal relationships.
+        
+        Called by:
+        - Language model forward() methods during inference and training
+        - video_audio_demo.py for multimodal inference
+        - Training loops for multimodal sequence processing
+        
+        Multimodal Fusion Process:
+        1. Vision Processing: Images/videos → InternViT → Vision Projector → Embeddings
+        2. Audio Processing: Speech → Whale Encoder → Audio Adapter → Embeddings
+        3. Text Processing: Tokens → Embedding Layer → Embeddings
+        4. Token Replacement: Replace <image> and <audio> tokens with actual embeddings
+        5. Sequence Fusion: Combine all modalities into unified embedding sequences
+        6. Padding & Alignment: Ensure consistent sequence lengths for batch processing
+        
+        Args:
+            input_ids (torch.Tensor): Text token IDs with special tokens (IMAGE_TOKEN_INDEX, AUDIO_TOKEN_INDEX)
+            position_ids (torch.Tensor): Position indices for each token in sequences
+            attention_mask (torch.Tensor): Attention mask for valid tokens vs padding
+            past_key_values: Cached attention states for efficient generation (if any)
+            labels (torch.Tensor): Target labels for training (IGNORE_INDEX for non-text tokens)
+            images: Image/video data to be processed by vision tower
+            audios (dict): Audio data with keys 'audios', 'lengths', 'lengths_for_llm', 'state_labels'
+            sf_masks: Slow-fast masks for video temporal processing (None for images/audio only)
+            shared_v_pid_stride (int, optional): Stride for shared position IDs in video processing
+            
+        Returns:
+            tuple: (None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels)
+                - None: Placeholder (input_ids no longer needed after embedding)
+                - position_ids: Updated position indices for fused sequences
+                - attention_mask: Updated attention mask for fused sequences
+                - past_key_values: Unchanged cached states
+                - new_input_embeds: Fused multimodal embeddings ready for transformer
+                - new_labels: Updated labels aligned with new embedding sequences
+        
+        Complex Processing:
+        - Handles missing modalities gracefully (vision-only, audio-only, text-only)
+        - Manages variable sequence lengths through dynamic padding
+        - Preserves causal attention patterns for language modeling
+        - Applies slow-fast video processing for long video sequences
+        - Maintains training label alignment for multimodal learning
+        
+        Flow continues to:
+        - Transformer language model attention mechanisms
+        - Causal language modeling for text generation
+        - TTS pipeline for speech synthesis (if applicable)
+        """
         vision_tower = self.get_vision_tower()
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
             if (
@@ -603,37 +1002,113 @@ class VITAMetaForCausalLM(ABC):
 
 
 def merge_consecutive_tuples(tuples_list):
+    """
+    Merge overlapping or consecutive tuples for efficient position ID processing.
+    
+    This utility function consolidates overlapping position ranges to optimize
+    shared position ID computation for video tokens. Used in video processing
+    to group adjacent visual tokens that should share position information.
+    
+    Called by:
+    - prepare_inputs_labels_for_multimodal() when shared_v_pid_stride is specified
+    - Video processing pipelines for position ID optimization
+    
+    Args:
+        tuples_list (list): List of (start, end) tuples representing token ranges
+                           E.g., [(0, 144), (144, 288), (300, 400)]
+    
+    Returns:
+        list: Merged tuples with overlapping ranges consolidated
+             E.g., [(0, 288), (300, 400)] from above example
+    
+    Merging Logic:
+    - Sorts tuples by start position
+    - Merges tuples where start <= previous_end (overlapping/consecutive)
+    - Preserves non-overlapping ranges as separate tuples
+    """
     if not tuples_list:
         return []
 
-    # 首先对列表按照起点索引进行排序
+    # Sort tuples by start index for sequential processing
     sorted_tuples = sorted(tuples_list, key=lambda x: x[0])
     
-    # 初始化合并后的列表
+    # Initialize with first tuple
     merged_tuples = [sorted_tuples[0]]
     
     for current_start, current_end in sorted_tuples[1:]:
         last_merged_start, last_merged_end = merged_tuples[-1]
-        if current_start <= last_merged_end:  # 如果当前元组的起点小于等于上一个合并元组的终点
-            # 合并这两个元组
+        
+        # Check if current tuple overlaps with or is consecutive to the last merged tuple
+        if current_start <= last_merged_end:
+            # Merge by extending the end position
             new_start, new_end = merged_tuples[-1][0], max(last_merged_end, current_end)
             merged_tuples[-1] = (new_start, new_end)
         else:
-            # 如果当前元组不连续，直接添加到合并后的列表中
+            # Non-overlapping tuple, add as separate range
             merged_tuples.append((current_start, current_end))
     
     return merged_tuples
 
 
 def make_shared_position_ids(cur_v_start_end, cur_len, shared_v_pid_stride):
+    """
+    Generate shared position IDs for video token sequences with temporal stride.
+    
+    This function creates position IDs where video tokens within a stride share
+    the same position, reducing the effective sequence length for attention
+    computation. Critical for processing long video sequences within context limits.
+    
+    Called by:
+    - prepare_inputs_labels_for_multimodal() when shared_v_pid_stride is specified
+    - Video processing pipelines requiring temporal position compression
+    
+    Position Sharing Strategy:
+    - Tokens within stride windows share position IDs
+    - Reduces effective sequence length for attention computation
+    - Maintains temporal relationships while managing context limits
+    
+    Args:
+        cur_v_start_end (list): List of (start, end) tuples defining video token ranges
+                               E.g., [(100, 244), (300, 444)] for two video segments
+        cur_len (int): Total sequence length including all tokens
+        shared_v_pid_stride (int): Stride for position sharing within video segments
+                                  E.g., stride=4 means every 4 video tokens share position
+    
+    Returns:
+        torch.Tensor: Position IDs with shape (cur_len,) where video tokens
+                     within stride windows share positions
+    
+    Position Calculation:
+    1. Initialize all positions to 1.0 (standard increment)
+    2. For video ranges: set increment to 1/stride (fractional advancement)
+    3. Handle remainder tokens with adjusted increment
+    4. Cumulative sum to get actual positions
+    5. Ceiling operation to ensure integer positions
+    
+    Example:
+    - cur_len=1000, cur_v_start_end=[(100, 244)], shared_v_pid_stride=4
+    - Tokens 0-99: positions 0-99 (standard)
+    - Tokens 100-243: positions advance by 0.25 each, grouped by 4s
+    - Tokens 244-999: continue standard position advancement
+    """
+    # Initialize position increments (1.0 = normal advancement)
     position_ids = torch.tensor([1.0] * cur_len)
 
+    # Apply shared positioning to video token ranges
     for start, end in cur_v_start_end:
-        position_ids[start:end] = 1/shared_v_pid_stride
+        # Within video segments, advance by fractional amount
+        position_ids[start:end] = 1 / shared_v_pid_stride
+        
+        # Handle remainder tokens that don't fill a complete stride
         v_mod = (end - start) % shared_v_pid_stride
         if v_mod != 0:
+            # Adjust increment for remainder tokens
             position_ids[end-v_mod:end] = 1 / v_mod
+    
+    # Convert increments to actual positions via cumulative sum
     position_ids = position_ids.cumsum(dim=0)
+    
+    # Ensure integer positions and 0-indexing
     position_ids = torch.ceil(position_ids).long() - 1
 
     return position_ids

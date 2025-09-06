@@ -1,3 +1,37 @@
+"""
+VITA Core Utilities - Essential utility functions for VITA system operations.
+
+This module provides fundamental utility functions that support the VITA multimodal
+architecture across training, inference, and deployment scenarios. It includes
+performance optimizations, logging infrastructure, and system-level utilities
+that are used throughout the VITA ecosystem.
+
+Core Functionality:
+- Model initialization optimization for faster startup times
+- Centralized logging infrastructure for debugging and monitoring
+- Error message standardization for user-facing applications
+- System performance optimizations for training and inference
+
+Called by:
+- video_audio_demo.py for demo initialization and optimization
+- Training scripts for model initialization acceleration
+- Web demo components for logging and error handling
+- Distributed training systems for consistent logging
+- Model loading pipelines for performance optimization
+
+Flow continues to:
+- Model initialization processes with optimized parameters
+- Logging systems for debugging and monitoring
+- Error handling in user-facing applications
+- Performance-critical training and inference loops
+
+Optimization Features:
+- PyTorch initialization bypass for faster model creation
+- Efficient logging with proper formatting and rotation
+- Standardized error messaging for consistent user experience
+- System-level performance enhancements
+"""
+
 import logging
 import logging.handlers
 import os
@@ -5,9 +39,12 @@ import sys
 
 from vita.constants import LOGDIR
 
+# Standardized error messages for user-facing applications
+# These provide consistent error communication across different VITA interfaces
 server_error_msg = "**NETWORK ERROR DUE TO HIGH TRAFFIC. PLEASE REGENERATE OR REFRESH THIS PAGE.**"
 moderation_msg = "YOUR INPUT VIOLATES OUR CONTENT MODERATION GUIDELINES. PLEASE TRY AGAIN."
 
+# Global logging handler for system-wide log management
 handler = None
 
 
@@ -22,6 +59,42 @@ def disable_torch_init():
 
 
 def build_logger(logger_name, logger_filename):
+    """
+    Build centralized logger for VITA system monitoring and debugging.
+    
+    This function creates a standardized logging infrastructure used across
+    all VITA components for consistent debugging, monitoring, and error tracking.
+    It provides proper log formatting, file rotation, and output management
+    for both development and production environments.
+    
+    Called by:
+    - Web demo components for interaction logging
+    - Training scripts for training progress monitoring
+    - Distributed systems for worker coordination logging
+    - Model inference pipelines for performance tracking
+    
+    Logging Features:
+    - Standardized timestamp and message formatting
+    - File-based logging with automatic rotation
+    - Console output for development debugging
+    - Proper log level management and filtering
+    
+    Args:
+        logger_name (str): Name identifier for the logger
+                          Used to distinguish between different system components
+        logger_filename (str): Filename for log output
+                              Stored in LOGDIR for centralized log management
+    
+    Returns:
+        logging.Logger: Configured logger instance ready for use
+                       Provides consistent logging across VITA system
+    
+    Flow continues to:
+    - Log message collection and formatting
+    - File system log storage and rotation
+    - Development debugging and production monitoring
+    - System health monitoring and error tracking
+    """
     global handler
 
     formatter = logging.Formatter(

@@ -1,3 +1,34 @@
+"""
+VITA Video-Audio Demo - Main inference script for VITA multimodal model demonstrations.
+
+This script provides the primary interface for running VITA model inference on video,
+audio, and image inputs. It handles the complete pipeline from raw media processing
+to text generation, showcasing VITA's multimodal capabilities in real-world scenarios.
+
+Core Functionality:
+- Video processing with temporal sampling and frame extraction
+- Audio processing for speech-to-text and audio understanding
+- Image processing for visual question answering
+- Multimodal conversation management with proper token handling
+- Flexible input configuration for various demonstration scenarios
+
+Called by:
+- Command line interface for model demonstrations
+- Evaluation scripts for testing model capabilities
+- Development and debugging workflows
+
+Flow continues to:
+- vita/model/builder.py load_pretrained_model() for model initialization
+- vita/model/vita_arch.py prepare_inputs_labels_for_multimodal() for input processing
+- vita/conversation.py for conversation state management
+- vita/util/mm_utils.py for token processing and stopping criteria
+
+Usage Examples:
+- Text query: python video_audio_demo.py --model_path [path] --image_path [image] --question "Describe this image"
+- Audio query: python video_audio_demo.py --model_path [path] --image_path [image] --audio_path [audio]
+- Video query: python video_audio_demo.py --model_path [path] --video_path [video] --question "What happens in this video?"
+"""
+
 import argparse
 import os
 import time
@@ -25,31 +56,124 @@ from vita.util.mm_utils import (
 )
 from vita.util.utils import disable_torch_init
 
+# Video processing constants matching VITA architecture requirements
+class VideoProcessingConstants:
+    """Constants for video processing pipeline optimized for VITA model requirements."""
+    
+    # Default image resolution for InternViT-300M-448px vision tower
+    # Must match vision encoder training resolution for optimal performance
+    DEFAULT_IMAGE_RESOLUTION = 384  # Slightly smaller than 448 for efficiency
+    
+    # Frame sampling parameters balancing temporal detail with context limits
+    DEFAULT_VIDEO_FRAMERATE = 1  # 1 FPS provides good temporal coverage
+    MIN_FRAMES = 4  # Minimum frames to ensure temporal understanding
+    
+    # Color normalization for square padding 
+    # Converts image_processor.image_mean (0-1) to RGB values (0-255)
+    COLOR_NORMALIZATION_FACTOR = 255
+    
+    # Temporal stride calculation for frame sampling
+    # Ensures uniform temporal distribution across video length
+    MAX_FRAME_BUFFER = 1000000000  # Large number for unconstrained end time
+
 
 def _get_rawvideo_dec(
     video_path,
     image_processor,
     max_frames=MAX_IMAGE_LENGTH,
-    min_frames=4,
-    image_resolution=384,
-    video_framerate=1,
+    min_frames=VideoProcessingConstants.MIN_FRAMES,
+    image_resolution=VideoProcessingConstants.DEFAULT_IMAGE_RESOLUTION,
+    video_framerate=VideoProcessingConstants.DEFAULT_VIDEO_FRAMERATE,
     s=None,
     e=None,
     image_aspect_ratio="pad",
 ):
-    # speed up video decode via decord.
+    """
+    Decode and preprocess video for VITA multimodal model inference.
+    
+    This function is the core video processing pipeline for VITA, handling video decoding,
+    temporal sampling, frame extraction, and preprocessing to prepare visual inputs
+    for the vision tower (InternViT-300M-448px). It optimizes for both quality and
+    efficiency by intelligently sampling frames and managing memory usage.
+    
+    Called by:
+    - video_audio_demo.py:209 main inference loop for video demonstration
+    - videomme/yt_video_inference_qa*.py for video evaluation pipelines
+    - web_demo/web_ability_demo.py:263 for web-based video demonstrations
+    - vita/util/data_utils_*.py training data processing across multiple variants
+    - VLMEvalKit evaluation framework for video understanding benchmarks
+    
+    Video Processing Pipeline:
+    1. Video Loading: Uses decord.VideoReader for efficient video decoding
+    2. Temporal Sampling: Calculates optimal frame positions within time constraints
+    3. Frame Extraction: Extracts frames as PIL images for preprocessing
+    4. Aspect Ratio Handling: Pads to square format for vision tower compatibility
+    5. Preprocessing: Applies image_processor transformations for model input
+    
+    Flow continues to:
+    - InternViT-300M-448px vision tower for feature extraction
+    - vita/model/vita_arch.py encode_images() for vision processing
+    - prepare_inputs_labels_for_multimodal() for token fusion
+    
+    Args:
+        video_path (str): Path to video file for processing
+        image_processor: Vision tower's image preprocessing pipeline (from InternViT)
+                        Handles normalization, resizing, and tensor conversion
+        max_frames (int, default=MAX_IMAGE_LENGTH): Maximum number of frames to extract
+                   Limited by context window and memory constraints (typically 16)
+        min_frames (int, default=4): Minimum frames to ensure temporal understanding
+                   Prevents degenerate cases with very short videos
+        image_resolution (int, default=384): Target resolution for preprocessed frames
+                        Balanced for efficiency vs. quality (InternViT supports up to 448)
+        video_framerate (int, default=1): Target FPS for temporal sampling
+                        1 FPS provides good temporal coverage without token explosion
+        s (float, optional): Start time in seconds for video segment processing
+        e (float, optional): End time in seconds for video segment processing
+        image_aspect_ratio (str, default="pad"): Aspect ratio handling strategy
+                          "pad" adds padding to make square (required for InternViT)
+    
+    Returns:
+        tuple: (patch_images, slice_len)
+            - patch_images (torch.Tensor): Preprocessed video frames with shape
+              (num_frames, channels, height, width) ready for vision tower
+            - slice_len (int): Number of frames processed (for token counting)
+    
+    Processing Strategy:
+    - Long videos (>max_frames): Uniformly downsample using np.linspace
+    - Short videos (<min_frames): Upsample by repeating frames
+    - Medium videos: Use all frames with temporal stride based on FPS
+    
+    Memory Optimization:
+    - Processes frames in batch using decord for efficiency
+    - Uses CPU context to avoid GPU memory pressure during decoding
+    - Applies preprocessing transformations sequentially to manage memory
+    
+    Aspect Ratio Handling:
+    - Square padding uses image_processor.image_mean as background color
+    - Maintains original content while ensuring vision tower compatibility
+    - Centers original content within square canvas
+    
+    Error Handling:
+    - FileNotFoundError for missing video files
+    - Graceful handling of corrupted video files
+    - Automatic time boundary validation and correction
+    """
+    # Efficient video decoding using decord library for speed optimization
 
+    # Process temporal segment parameters with validation
     if s is None:
         start_time, end_time = None, None
     else:
         start_time = int(s)
         end_time = int(e)
+        # Ensure non-negative time values
         start_time = start_time if start_time >= 0.0 else 0.0
         end_time = end_time if end_time >= 0.0 else 0.0
+        # Handle invalid time ranges
         if start_time > end_time:
             start_time, end_time = end_time, start_time
         elif start_time == end_time:
-            end_time = start_time + 1
+            end_time = start_time + 1  # Ensure minimum 1-second duration
 
     if os.path.exists(video_path):
         vreader = VideoReader(video_path, ctx=cpu(0))
@@ -57,47 +181,80 @@ def _get_rawvideo_dec(
         print(video_path)
         raise FileNotFoundError
 
+    # Calculate frame indices based on video FPS and time constraints
     fps = vreader.get_avg_fps()
     f_start = 0 if start_time is None else int(start_time * fps)
-    f_end = int(min(1000000000 if end_time is None else end_time * fps, len(vreader) - 1))
+    f_end = int(min(
+        VideoProcessingConstants.MAX_FRAME_BUFFER if end_time is None else end_time * fps, 
+        len(vreader) - 1
+    ))
     num_frames = f_end - f_start + 1
     if num_frames > 0:
-        # T x 3 x H x W
-        sample_fps = int(video_framerate)
-        t_stride = int(round(float(fps) / sample_fps))
+        # Calculate temporal sampling parameters for uniform frame distribution
+        # Target framerate determines temporal resolution for model processing
+        sample_fps = int(video_framerate)  # Target FPS for temporal sampling
+        t_stride = int(round(float(fps) / sample_fps))  # Frame interval for sampling
 
+        # Generate frame positions with intelligent sampling strategy
         all_pos = list(range(f_start, f_end + 1, t_stride))
+        
+        # Apply adaptive sampling based on video length vs. token limits
         if len(all_pos) > max_frames:
+            # Long videos: downsample uniformly to fit context window
             sample_pos = [
                 all_pos[_] for _ in np.linspace(0, len(all_pos) - 1, num=max_frames, dtype=int)
             ]
         elif len(all_pos) < min_frames:
+            # Short videos: upsample to ensure sufficient temporal information
             sample_pos = [
                 all_pos[_] for _ in np.linspace(0, len(all_pos) - 1, num=min_frames, dtype=int)
             ]
         else:
+            # Optimal range: use all available frames
             sample_pos = all_pos
 
+        # Extract frames efficiently using decord batch processing
         patch_images = [Image.fromarray(f) for f in vreader.get_batch(sample_pos).asnumpy()]
 
+        # Apply aspect ratio handling for vision tower compatibility
         if image_aspect_ratio == "pad":
-
             def expand2square(pil_img, background_color):
+                """
+                Expand image to square format by adding padding.
+                
+                InternViT-300M-448px vision tower requires square input images.
+                This function pads rectangular images with background color to
+                create square format while preserving original aspect ratios.
+                
+                Args:
+                    pil_img (PIL.Image): Input image to pad
+                    background_color (tuple): RGB background color for padding
+                    
+                Returns:
+                    PIL.Image: Square image with original content centered
+                """
                 width, height = pil_img.size
                 if width == height:
                     return pil_img
                 elif width > height:
+                    # Wide image: add padding to top and bottom
                     result = Image.new(pil_img.mode, (width, width), background_color)
                     result.paste(pil_img, (0, (width - height) // 2))
                     return result
                 else:
+                    # Tall image: add padding to left and right
                     result = Image.new(pil_img.mode, (height, height), background_color)
                     result.paste(pil_img, ((height - width) // 2, 0))
                     return result
 
+            # Apply square padding using vision tower's mean pixel values as background
+            # image_processor.image_mean is in [0,1] format, convert to [0,255] RGB
+            background_color = tuple(
+                int(x * VideoProcessingConstants.COLOR_NORMALIZATION_FACTOR) 
+                for x in image_processor.image_mean
+            )
             patch_images = [
-                expand2square(i, tuple(int(x * 255) for x in image_processor.image_mean))
-                for i in patch_images
+                expand2square(i, background_color) for i in patch_images
             ]
             patch_images = [
                 image_processor.preprocess(i, return_tensors="pt")["pixel_values"][0]

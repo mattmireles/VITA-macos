@@ -28,15 +28,77 @@ def expand2square(pil_img, background_color):
 
 
 def process_images(images, image_processor, model_cfg):
+    """
+    Process batch of images for VITA vision tower input with configurable aspect ratio handling.
+    
+    This function applies the complete image preprocessing pipeline required for InternViT-300M-448px
+    vision tower processing. It handles aspect ratio management, normalization, and tensor conversion
+    based on model configuration settings.
+    
+    Called by:
+    - Training data pipelines across vita/util/data_utils_*.py for batch preprocessing
+    - Evaluation scripts for benchmark image processing
+    - Demo scripts for real-time image processing
+    
+    Processing Pipeline:
+    1. Aspect Ratio Handling: Based on model_cfg.image_aspect_ratio setting
+       - "pad": Use expand2square() for square padding with vision tower mean colors
+       - Other: Use default image_processor behavior (crop/resize)
+    2. Vision Tower Preprocessing: Apply image_processor transformations
+    3. Tensor Conversion: Convert to PyTorch tensors for model input
+    4. Batch Stacking: Stack compatible tensors for efficient processing
+    
+    Flow continues to:
+    - InternViT-300M-448px vision tower for feature extraction
+    - vita/model/vita_arch.py encode_images() for vision processing
+    - prepare_inputs_labels_for_multimodal() for token fusion
+    
+    Args:
+        images (list): List of PIL.Image objects to process
+        image_processor: Vision tower's image preprocessing pipeline
+                        From InternViT-300M-448px with normalization and resizing
+        model_cfg: Model configuration object containing:
+                  - image_aspect_ratio: "pad" for square padding, None for default processing
+                  - Other vision-related configuration parameters
+    
+    Returns:
+        torch.Tensor: Processed images ready for vision tower
+                     Shape: (batch_size, channels, height, width) or list of tensors
+                     if shapes are incompatible for stacking
+    
+    Aspect Ratio Strategies:
+    - "pad": Maintains original content with square padding using vision tower mean colors
+    - Default: Uses image_processor's built-in aspect ratio handling (may crop)
+    
+    Memory Optimization:
+    - Processes images individually to manage memory usage
+    - Stacks tensors only when shapes are compatible
+    - Uses efficient tensor operations for batch processing
+    
+    Error Handling:
+    - Gracefully handles images with different dimensions
+    - Falls back to list format if tensor stacking fails
+    """
     image_aspect_ratio = getattr(model_cfg, "image_aspect_ratio", None)
     new_images = []
+    
     if image_aspect_ratio == "pad":
+        # Apply square padding preprocessing for each image
         for image in images:
-            image = expand2square(image, tuple(int(x * 255) for x in image_processor.image_mean))
+            # Expand to square using vision tower's mean pixel values as background
+            background_color = tuple(
+                int(x * ImageProcessingConstants.COLOR_NORMALIZATION_FACTOR) 
+                for x in image_processor.image_mean
+            )
+            image = expand2square(image, background_color)
+            # Apply vision tower preprocessing transformations
             image = image_processor.preprocess(image, return_tensors="pt")["pixel_values"][0]
             new_images.append(image)
     else:
+        # Use default image processor behavior (may crop or resize)
         return image_processor(images, return_tensors="pt")["pixel_values"]
+    
+    # Stack tensors if all images have compatible shapes
     if all(x.shape == new_images[0].shape for x in new_images):
         new_images = torch.stack(new_images, dim=0)
     return new_images

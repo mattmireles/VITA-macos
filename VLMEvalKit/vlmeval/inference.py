@@ -1,13 +1,70 @@
+"""
+VLMEvalKit Inference Engine - Distributed inference for vision-language models.
+
+This module orchestrates large-scale inference across multiple vision-language
+models and datasets. It provides distributed processing capabilities for efficient
+evaluation of VITA and other VLM models on benchmark datasets.
+
+Core Functionality:
+- Distributed inference across multiple GPUs and processes
+- API-based model inference with rate limiting and error handling
+- Dataset batching and progress tracking for large evaluations
+- Model result caching and resumption of interrupted evaluations
+
+Called by:
+- Benchmark evaluation scripts for systematic model assessment
+- Research pipelines for comparative model analysis
+- Production evaluation systems for model validation
+- Academic benchmark submission workflows
+
+This inference engine supports:
+- VITA multimodal models with vision, audio, and text processing
+- API-based models with rate limiting and timeout handling
+- Local GPU-based models with distributed processing
+- Custom prompt formatting for dataset-specific evaluation
+
+Flow continues to:
+- Model-specific inference implementations
+- Result aggregation and metric calculation
+- Performance analysis and comparison reports
+- Benchmark leaderboard submissions
+
+Optimization Features:
+- Parallel processing across multiple workers
+- Intelligent batching for memory optimization
+- Progress tracking and resumption capabilities
+- Error handling and retry mechanisms
+"""
+
 import torch
 import torch.distributed as dist
 from vlmeval.config import supported_VLM
 from vlmeval.utils import track_progress_rich
 from vlmeval.smp import *
 
+# Error message constant for API failures
 FAIL_MSG = 'Failed to obtain answer via API.'
 
 
 def parse_args():
+    """
+    Parse command line arguments for distributed inference configuration.
+    
+    Configures inference parameters including datasets, models, and
+    processing settings for large-scale VLM evaluation workflows.
+    
+    Called by:
+    - Main inference script initialization
+    - Distributed evaluation launch scripts
+    - Benchmark evaluation workflows
+    
+    Returns:
+        argparse.Namespace: Configuration containing:
+            - data: List of datasets to evaluate
+            - model: List of models to test
+            - nproc: Number of processes for distributed inference
+            - verbose: Enable detailed logging output
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument('--data', type=str, nargs='+', required=True)
     parser.add_argument('--model', type=str, nargs='+', required=True)
@@ -17,8 +74,31 @@ def parse_args():
     return args
 
 
-# Only API model is accepted
 def infer_data_api(work_dir, model_name, dataset, index_set=None, api_nproc=4, ignore_failed=False):
+    """
+    Execute API-based inference for vision-language model evaluation.
+    
+    This function handles API-based model inference with proper error handling,
+    rate limiting, and result caching. Used for evaluating models that provide
+    API endpoints rather than direct model access.
+    
+    Called by:
+    - Main evaluation workflows for API-based models
+    - Distributed inference systems for remote model access
+    - Benchmark evaluation pipelines with API model support
+    
+    Args:
+        work_dir (str): Working directory for result storage
+        model_name (str): Name of API model to evaluate
+        dataset: Dataset object containing evaluation samples
+        index_set (list, optional): Subset of indices to process
+        api_nproc (int): Number of concurrent API requests
+        ignore_failed (bool): Continue on API failures
+    
+    Returns:
+        Results from API-based model inference
+        Includes proper error handling and retry mechanisms
+    """
     rank, world_size = get_rank_and_world_size()
     assert rank == 0 and world_size == 1
     dataset_name = dataset.dataset_name
@@ -27,7 +107,8 @@ def infer_data_api(work_dir, model_name, dataset, index_set=None, api_nproc=4, i
         data = data[data['index'].isin(index_set)]
 
     model = supported_VLM[model_name]() if isinstance(model_name, str) else model_name
-    assert getattr(model, 'is_api', False)
+    # Ensure model supports API-based inference
+    assert getattr(model, 'is_api', False), f"Model {model_name} does not support API inference"
 
     lt, indices = len(data), list(data['index'])
 

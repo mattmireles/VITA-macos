@@ -1,3 +1,43 @@
+"""
+VITA Training Pipeline - Main training script for multimodal VITA models.
+
+This script orchestrates the complete training process for VITA multimodal models,
+integrating vision, audio, and language components into a unified training pipeline.
+It handles distributed training, data loading, model initialization, and training
+configuration for the VITA architecture.
+
+Core Functionality:
+- Multi-GPU distributed training setup and coordination
+- Multimodal data pipeline integration (vision + audio + text)
+- Model architecture initialization and component freezing
+- Training hyperparameter configuration and validation
+- Checkpoint management and model saving
+
+Called by:
+- Training launch scripts for distributed training
+- Hyperparameter search systems for model optimization
+- Fine-tuning pipelines for domain adaptation
+- Research experiments for architecture validation
+
+This script integrates:
+- vita/model/builder.py for model loading and initialization
+- vita/train/vita_trainer.py for custom training logic
+- vita/util/data_utils_video_audio_neg_patch.py for data loading
+- vita/conversation.py for conversation formatting
+
+Flow continues to:
+- Distributed training across multiple GPUs
+- Model checkpointing and evaluation cycles  
+- Final model export for inference deployment
+- Performance metrics collection and logging
+
+Architecture Components Trained:
+- Vision tower: InternViT-300M-448px for image/video encoding
+- Audio encoder: Whale for speech processing
+- Language model: Mixtral-8x7B/Qwen2.5/Nemo backbone
+- Multimodal fusion: Cross-attention and projection layers
+"""
+
 import logging
 import os
 import pathlib
@@ -22,6 +62,21 @@ from vita.util.data_utils_video_audio_neg_patch import make_supervised_data_modu
 
 
 def set_random_seed(seed):
+    """
+    Set random seeds for reproducible training across all frameworks.
+    
+    Ensures deterministic behavior during training by setting seeds for
+    Python's random module, NumPy, PyTorch CPU operations, PyTorch CUDA
+    operations, and HuggingFace transformers library.
+    
+    Called by:
+    - Main training script initialization
+    - Distributed training worker setup
+    - Evaluation scripts for consistent results
+    
+    Args:
+        seed (int): Random seed value (typically 42 for VITA training)
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -37,12 +92,44 @@ local_rank = None
 
 
 def rank0_print(*args):
+    """
+    Print messages only from rank 0 process in distributed training.
+    
+    Prevents duplicate logging output when training across multiple GPUs.
+    Only the main process (rank 0) prints to console and logs.
+    
+    Called by:
+    - Training progress logging throughout the script
+    - Model configuration printing
+    - Checkpoint saving notifications
+    
+    Args:
+        *args: Arguments to print (same as built-in print())
+    """
     if local_rank == 0:
         print(*args)
 
 
 @dataclass
 class ModelArguments:
+    """
+    Configuration arguments for VITA model initialization and training.
+    
+    Defines all model-related hyperparameters and configuration options
+    used during training. These arguments control model architecture,
+    component freezing, and multimodal training strategies.
+    
+    Used by:
+    - Model initialization in main training loop
+    - Hyperparameter search and tuning systems
+    - Model configuration validation and logging
+    
+    Key Configuration Areas:
+    - Model loading: Path and type specification
+    - Component freezing: Selective training of model parts
+    - Multimodal settings: Vision and audio integration parameters
+    - Training modes: Full training vs adapter tuning strategies
+    """
     model_name_or_path: Optional[str] = field(default=None)
     model_type: Optional[str] = field(default=None)
     version: Optional[str] = field(default=None)

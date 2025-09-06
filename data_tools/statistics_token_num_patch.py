@@ -1,3 +1,36 @@
+"""
+VITA Token Statistics Analysis - Training data token distribution analyzer.
+
+This script analyzes multimodal training datasets to compute token count distributions
+across different modalities (text, image patches, audio duration). It helps optimize
+training batch sizes and identify sequences that exceed context window limits.
+
+Core Functionality:
+- Multimodal token counting (text + image patches + audio frames)
+- Dynamic image patch calculation using adaptive preprocessing
+- Audio duration-to-token conversion for speech data
+- Statistical distribution analysis for batch size optimization
+- Long sequence identification and debugging
+
+Called by:
+- Data preprocessing pipelines for batch size tuning
+- Training configuration scripts for memory optimization
+- Dataset quality analysis workflows
+- Context window management systems
+
+This analysis feeds into:
+- Training hyperparameter selection (batch_size, max_length)
+- Memory allocation strategies for distributed training
+- Data filtering pipelines for extreme outliers
+- Model architecture decisions for context window sizing
+
+Token Calculation Components:
+- Text tokens: Standard tokenizer output from conversation formatting
+- Image patches: Dynamic preprocessing (1-12 patches per image) × 256 tokens/patch
+- Audio tokens: Duration in seconds × 12.5 tokens/second (Whale encoder rate)
+- Total context window: Sum of all modalities must fit within model limits
+"""
+
 import json
 import math
 import os
@@ -18,12 +51,25 @@ from vita.util.data_utils_video_audio import DataArguments, LazySupervisedDatase
 from vita.util.data_utils_video_audio_neg_patch import find_closest_aspect_ratio
 from vita.util.mm_utils import tokenizer_image_audio_token, tokenizer_image_token
 
-image_token_num = 256
-token_thre = 9500
+# Constants for token calculation and analysis thresholds
+# These values determine how different modalities are converted to token counts
 
+# Number of tokens per image patch after vision tower encoding
+# InternViT-300M-448px outputs 256-dimensional embeddings per patch
+IMAGE_TOKEN_NUM = 256
+
+# Token count threshold for identifying problematic sequences
+# Sequences above this limit may cause memory issues during training
+# Based on typical 8192-10240 context window limits for LLMs
+TOKEN_THRESHOLD = 9500
+
+# Dataset configuration for analysis
+# Uses NaturalCap datasets from vita.config for multimodal training data
 datasets = NaturalCap
 
-out_file_name = "debug.json"
+# Output file for sequences exceeding token threshold
+# Used for debugging and manual inspection of problematic data
+OUT_FILE_NAME = "debug.json"
 
 parser = transformers.HfArgumentParser((DataArguments))
 tokenizer = transformers.AutoTokenizer.from_pretrained(
@@ -38,6 +84,35 @@ long_json = []
 
 
 def dynamic_preprocess(image, min_num=1, max_num=12, image_size=448, use_thumbnail=True):
+    """
+    Calculate optimal number of patches for dynamic image preprocessing.
+    
+    This function implements VITA's adaptive image patching strategy that
+    divides images into 1-12 patches based on aspect ratio optimization.
+    It ensures efficient vision token usage while preserving image detail.
+    
+    Called by:
+    - process_item() for token counting during dataset analysis
+    - vita/util/data_utils_video_audio_patch.py during training
+    - Image preprocessing pipelines for inference
+    
+    Algorithm:
+    1. Calculate original image aspect ratio
+    2. Generate all possible patch grid configurations (1x1 to NxM)
+    3. Find grid that minimizes aspect ratio distortion
+    4. Add thumbnail patch if using multi-patch configuration
+    
+    Args:
+        image (PIL.Image): Input image for patch calculation
+        min_num (int): Minimum number of patches (default: 1)
+        max_num (int): Maximum number of patches (default: 12)
+        image_size (int): Target size per patch in pixels (default: 448)
+        use_thumbnail (bool): Add thumbnail for multi-patch images
+    
+    Returns:
+        int: Total number of patches needed for this image
+             Each patch contributes 256 tokens to final sequence length
+    """
     orig_width, orig_height = image.size
     aspect_ratio = orig_width / orig_height
 
@@ -66,12 +141,57 @@ def dynamic_preprocess(image, min_num=1, max_num=12, image_size=448, use_thumbna
 
 
 def get_wav_duration(file_path):
+    """
+    Calculate audio file duration for token count estimation.
+    
+    Used to convert audio duration into token counts for context window
+    management. The Whale audio encoder processes speech at 12.5 tokens
+    per second, so duration directly translates to token requirements.
+    
+    Called by:
+    - process_item() during dataset token analysis
+    - Training data loaders for sequence length calculation
+    - Batch size optimization scripts
+    
+    Args:
+        file_path (str): Path to audio file (.wav format)
+    
+    Returns:
+        float: Duration in seconds
+               Multiply by 12.5 to get token count for this audio
+    """
     waveform, sample_rate = torchaudio.load(file_path)
     duration = waveform.size(1) / sample_rate
     return duration
 
 
 def process_item(item, tokenizer):
+    """
+    Calculate total token count for a multimodal training sample.
+    
+    This is the core function that computes the complete token requirements
+    for a VITA training sample including text, image patches, and audio frames.
+    Used for dataset analysis, batch optimization, and memory planning.
+    
+    Token Calculation:
+    - Text tokens: Conversation formatted through get_prompt() and tokenized
+    - Image tokens: Dynamic patches × 256 tokens per patch
+    - Audio tokens: Duration in seconds × 12.5 tokens per second
+    - Total must fit within model's context window (typically 8192-10240)
+    
+    Called by:
+    - Main analysis loop with ThreadPoolExecutor for parallel processing
+    - Dataset quality assessment scripts
+    - Training pipeline memory optimization
+    
+    Args:
+        item (dict): Training sample with 'conversations', optional 'image', 'audio'
+        tokenizer: HuggingFace tokenizer for text token counting
+    
+    Returns:
+        int: Total token count for this sample across all modalities
+             Includes text + image patches + audio duration tokens
+    """
     conv = conversation_lib.default_conversation.copy()
     roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
     source = item["conversations"]
@@ -105,7 +225,7 @@ def process_item(item, tokenizer):
                 num_patches = dynamic_preprocess(image)
             else:
                 num_patches = 1
-            item_token_num += num_patches * image_token_num
+            item_token_num += num_patches * IMAGE_TOKEN_NUM
 
     total_duration = 0
     if "audio" in item:
@@ -122,7 +242,7 @@ def process_item(item, tokenizer):
             )
             total_duration += duration
         item_token_num += math.ceil(total_duration * 12.5)
-    if item_token_num > token_thre:
+    if item_token_num > TOKEN_THRESHOLD:
         print(f"item_token_num: {item_token_num}")
         if "image" in item and len(item["image"]) >= 16:
             print(f"num_patches: {num_patches}")
@@ -242,7 +362,7 @@ for dataset in datasets:
     for key, value in distribution.items():
         print(f"{key}: {value}")
 
-# with open(out_file_name, 'w', encoding='utf-8') as file:
+# with open(OUT_FILE_NAME, 'w', encoding='utf-8') as file:
 #    json.dump(long_json*10, file, ensure_ascii=False, indent=4)
 
-# print(f"处理完成，大于{token_thre}的已保存到{out_file_name}")
+# print(f"Processing complete. Sequences longer than {TOKEN_THRESHOLD} tokens saved to {OUT_FILE_NAME}")

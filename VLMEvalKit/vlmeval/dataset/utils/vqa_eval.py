@@ -2,14 +2,70 @@
 # Partly adopted from https://github.com/GT-Vision-Lab/VQA
 # Copyright (c) 2014, Aishwarya Agrawal
 
+"""
+VQA Evaluation Utilities - Vision Question Answering assessment and scoring.
+
+This module provides standardized evaluation metrics and text processing
+functions for Vision Question Answering (VQA) tasks. It implements the
+official VQA evaluation protocol with proper answer normalization and
+scoring mechanisms used in academic benchmarks.
+
+Core Functionality:
+- Answer text normalization and preprocessing
+- VQA accuracy calculation with multiple ground truth answers
+- Standardized evaluation protocols for vision-language models
+- Text processing utilities for consistent answer comparison
+
+Called by:
+- VITA evaluation pipelines for VQA benchmark assessment
+- Model comparison scripts for performance measurement
+- Research evaluation frameworks for standardized metrics
+- Benchmark submission systems for official scoring
+
+This evaluation feeds into:
+- Model performance reports and leaderboards
+- Research paper results and comparisons
+- Model selection and hyperparameter optimization
+- Academic benchmark submissions and rankings
+
+Text Processing Features:
+- Digit and article normalization for consistent comparison
+- Contraction expansion for standardized text forms
+- Punctuation handling and case normalization
+- Multiple answer consensus scoring
+"""
+
 from ...smp import *
 from typing import Optional
 
 
 def _process_digit_article(inText):
+    """
+    Normalize text by processing digits and articles for VQA evaluation.
+    
+    This function standardizes answer text by converting written numbers
+    to digits, handling contractions, and removing articles. This ensures
+    consistent comparison between predicted and ground truth answers.
+    
+    Called by:
+    - VQA evaluation functions for answer normalization
+    - Text preprocessing pipelines before answer comparison
+    - Benchmark evaluation scripts for standardized scoring
+    
+    Args:
+        inText (str): Input answer text to normalize
+    
+    Returns:
+        str: Normalized text with processed digits and articles
+             Ready for standardized VQA evaluation comparison
+    ""\
     outText = []
     tempText = inText.lower().split()
+    # Articles to remove for normalized comparison
+    # VQA answers should not be penalized for article differences
     articles = ['a', 'an', 'the']
+    # Mapping for converting written numbers to digits
+    # Essential for VQA evaluation where '2' and 'two' should be equivalent
     manualMap = {
         'none': '0',
         'zero': '0',

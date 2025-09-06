@@ -1,3 +1,51 @@
+"""
+VITA Training Data Utilities - Multimodal data processing pipeline for VITA model training.
+
+This module implements the core data processing pipeline for training VITA models with
+vision, audio, and text modalities. It handles complex multimodal data loading, preprocessing,
+tokenization, and batch construction for efficient training across different model architectures.
+
+Core Functionality:
+- Multimodal data loading and preprocessing for training datasets
+- Dynamic image patching and aspect ratio handling for vision tower compatibility
+- Audio-visual synchronization and alignment for temporal understanding
+- Model-specific conversation formatting (Mixtral, Nemo, Qwen2.5)
+- Efficient batch collation and tensor preparation for multi-GPU training
+- Advanced data augmentation strategies for robust multimodal learning
+
+Data Processing Pipeline:
+1. Raw Data Loading: JSON metadata → multimodal file loading (images/videos/audio)
+2. Preprocessing: Format conversion, aspect ratio handling, temporal sampling
+3. Tokenization: Text → tokens, multimodal placeholders → special indices
+4. Conversation Formatting: Model-specific prompt templates and separator styles
+5. Batch Collation: Dynamic padding, attention mask creation, label alignment
+6. Tensor Preparation: GPU-ready tensors with proper device placement
+
+Called by:
+- Training scripts in script/train/ for model training loops
+- Data loading configuration in vita/config/ for dataset setup
+- Evaluation pipelines for consistent preprocessing
+- Distributed training systems for multi-node data loading
+
+Flow continues to:
+- vita/model/vita_arch.py prepare_inputs_labels_for_multimodal() for token fusion
+- Language model forward passes with preprocessed multimodal data
+- Training loop optimization and gradient computation
+- Model checkpointing and validation processes
+
+Supported Model Architectures:
+- Mixtral-8x7B with custom conversation formatting
+- Nemo (Mistral-based) with [INST] wrapper format
+- Qwen2.5-Instruct with <|im_start|>/<|im_end|> tokens
+- Plain text models with minimal formatting
+
+Multimodal Capabilities:
+- Vision: Images and videos with dynamic patching (1-12 patches per image)
+- Audio: Speech and sound with temporal alignment
+- Text: Conversation history with role-based formatting
+- Fusion: Seamless integration across all modalities
+"""
+
 import copy
 import json
 import math
@@ -26,6 +74,37 @@ from vita.constants import (
     MIN_IMAGE_LENGTH,
 )
 from vita.util.mm_utils import tokenizer_image_audio_token, tokenizer_image_token
+
+# Training data processing constants
+class TrainingDataConstants:
+    """Constants for VITA training data processing and augmentation."""
+    
+    # Dynamic patch configuration for adaptive image processing
+    # Allows models to handle varying image complexities efficiently
+    DEFAULT_MIN_DYNAMIC_PATCH = 1   # Minimum patches per image (simple scenes)
+    DEFAULT_MAX_DYNAMIC_PATCH = 12  # Maximum patches per image (complex scenes)
+    
+    # Image preprocessing parameters
+    DEFAULT_IMAGE_SIZE = 448        # Standard image size for InternViT-300M-448px
+    DEFAULT_USE_THUMBNAIL = True    # Enable thumbnail generation for context
+    
+    # Target aspect ratios for dynamic preprocessing
+    # Optimized for common image and video aspect ratios
+    TARGET_ASPECT_RATIOS = [
+        (1, 1), (1, 2), (1, 3), (1, 4),    # Portrait ratios
+        (2, 1), (3, 1), (4, 1),            # Landscape ratios
+        (3, 2), (2, 3),                    # Common photo ratios
+        (16, 9), (9, 16)                   # Widescreen ratios
+    ]
+    
+    # Video processing parameters for training data
+    DEFAULT_VIDEO_FPS = 1          # Frame sampling rate for training videos
+    MAX_VIDEO_FRAMES = 16          # Maximum frames per video sequence
+    MIN_VIDEO_FRAMES = 4           # Minimum frames for temporal understanding
+    
+    # Audio processing parameters
+    AUDIO_SAMPLE_RATE = 16000      # Standard sample rate for speech processing
+    MAX_AUDIO_LENGTH = 30          # Maximum audio duration in seconds
 
 
 @dataclass

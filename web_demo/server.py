@@ -1,3 +1,42 @@
+"""
+VITA Web Demo Server - Real-time multimodal AI interaction server.
+
+This server provides a web-based interface for interacting with VITA models
+in real-time. It handles multimodal input (text, images, audio) through
+WebSocket connections and provides streaming responses for natural conversation.
+
+Core Functionality:
+- Real-time WebSocket communication for low-latency interaction
+- Multimodal input processing (text, images, audio streams)
+- Session management with user limits and timeout handling
+- SSL/TLS support for secure connections
+- Concurrent user handling with resource management
+
+Called by:
+- Web demo deployment scripts for production serving
+- Development environments for testing multimodal interactions
+- Demo systems for showcasing VITA capabilities
+- Research interfaces for model evaluation
+
+This server integrates:
+- VITA model loading and inference pipelines
+- Real-time audio processing and voice activity detection
+- Image upload and processing workflows
+- WebSocket message handling and session state
+
+Flow continues to:
+- Model inference for generating multimodal responses
+- Audio synthesis for voice output (if enabled)
+- Real-time streaming of generated content
+- Session cleanup and resource management
+
+Technical Architecture:
+- Flask + SocketIO for WebSocket communication
+- Multiprocessing for concurrent user handling
+- SSL certificate generation for secure connections
+- Resource pooling for model inference optimization
+"""
+
 from __future__ import print_function
 
 import atexit
@@ -26,18 +65,50 @@ from web_demo.vita_html.web.parms import GlobalParams
 from web_demo.vita_html.web.pem import generate_self_signed_cert
 
 def get_args():
+    """
+    Parse command line arguments for web demo server configuration.
+    
+    Configures server parameters including model path, network settings,
+    user limits, and session timeouts. These settings control the server's
+    behavior and resource allocation for multimodal AI interactions.
+    
+    Called by:
+    - Main server initialization
+    - Deployment scripts for production configuration
+    - Development setup for local testing
+    
+    Returns:
+        argparse.Namespace: Configuration arguments containing:
+            - model_path: Path to VITA model checkpoint
+            - ip: Server IP address for binding
+            - port: Server port for WebSocket connections
+            - max_users: Maximum concurrent users allowed
+            - timeout: Session timeout in seconds
+    """
     parser = argparse.ArgumentParser(description='VITA')
-    parser.add_argument('--model_path', help='model_path to load', default='../VITA_ckpt')
-    parser.add_argument('--ip', help='ip of server', default='127.0.0.1')
-    parser.add_argument('--port', help='port of server', default=8081)
-    parser.add_argument('--max_users', type=int, default=2)
-    parser.add_argument('--timeout', type=int, default=600)
+    parser.add_argument('--model_path', help='Path to VITA model checkpoint directory', default='../VITA_ckpt')
+    parser.add_argument('--ip', help='Server IP address for binding', default='127.0.0.1')
+    parser.add_argument('--port', help='Server port for WebSocket connections', default=8081)
+    parser.add_argument('--max_users', type=int, default=2, help='Maximum concurrent users allowed')
+    parser.add_argument('--timeout', type=int, default=600, help='Session timeout in seconds')
     args = parser.parse_args()
     print(args)
     return args
 
-# 定义颜色代码
+# Console output color definitions for enhanced logging
 class Colors:
+    """
+    ANSI color codes for enhanced console logging and debugging.
+    
+    Provides colored output for different types of server messages,
+    making it easier to distinguish between different log levels
+    and message types during development and debugging.
+    
+    Used by:
+    - custom_print() for colored console output
+    - Server logging systems for visual message distinction
+    - Debug output formatting throughout the web demo
+    """
     RED = '\033[91m'
     GREEN = '\033[92m'
     YELLOW = '\033[93m'
@@ -48,6 +119,22 @@ class Colors:
     RESET = '\033[0m'
 
 def custom_print(*args, **kwargs):
+    """
+    Custom print function with timestamp and color support.
+    
+    Enhances standard print functionality with timestamps and color
+    coding for improved debugging and monitoring of the web demo server.
+    Used throughout the server for consistent log formatting.
+    
+    Called by:
+    - Server event handlers for connection/disconnection logging
+    - Model inference processes for performance monitoring
+    - Error handling systems for debugging output
+    
+    Args:
+        *args: Arguments to print (same as built-in print())
+        **kwargs: Keyword arguments passed to built-in print()
+    ""\
     current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
     original_print(f'[{current_time}]', *args, **kwargs)
 

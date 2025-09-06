@@ -30,6 +30,80 @@ class Conversation:
     skip_next: bool = False
 
     def get_prompt(self, modality=None):
+        """
+        Generate formatted prompt string from conversation history for different model architectures.
+        
+        This method is the core conversation formatting engine for VITA, transforming conversation
+        history into model-specific prompt formats. It handles complex multi-turn dialogues with
+        multimodal content (images, videos, audio) and adapts the formatting to match different
+        language model architectures' expected input formats.
+        
+        Called by:
+        - video_audio_demo.py for demonstration conversation formatting
+        - web_demo/web_ability_demo.py for real-time web interface interactions
+        - vita/util/data_utils_*.py training data preparation across multiple variants
+        - videomme/yt_video_inference_qa*.py for video evaluation pipelines
+        - VLMEvalKit evaluation scripts for benchmark processing
+        - data_tools/*.py scripts for data processing and statistics
+        
+        Model-Specific Formatting Strategies:
+        1. SeparatorStyle.TWO: Basic two-separator format for general models
+        2. SeparatorStyle.MixtralZh: Chinese-optimized Mixtral formatting
+        3. SeparatorStyle.MixtralTwo: Advanced Mixtral with modality-aware system prompts
+        4. SeparatorStyle.Nemo: Mistral-based Nemo with [INST] wrapper format
+        5. SeparatorStyle.Qwen2p5Instruct: Qwen2.5 with <|im_start|>/<|im_end|> tokens
+        6. SeparatorStyle.PLAIN: Minimal formatting for simple models
+        
+        Flow continues to:
+        - vita/util/mm_utils.py tokenizer_image_audio_token() for token processing
+        - Model tokenization and input preparation
+        - Language model forward pass with formatted conversation context
+        
+        Args:
+            modality (str, optional): Content modality for system prompt selection
+                                    Required for certain separator styles (MixtralTwo, Nemo, Qwen2p5Instruct)
+                                    - "image": Single image processing
+                                    - "video": Video sequence processing  
+                                    - "lang": Text-only conversation
+                                    - None: Use default formatting without modality-specific prompts
+        
+        Returns:
+            str: Formatted prompt string ready for model tokenization
+                Contains conversation history with appropriate separators,
+                system prompts, and special tokens based on model architecture
+        
+        Multimodal Processing:
+        - Detects <image> tokens in conversation to determine multimodal vs text-only mode
+        - Selects appropriate system prompts based on modality (image/video/text)
+        - Handles special multimodal tag formatting for certain model versions
+        - Processes tuple-format messages containing multimodal metadata
+        
+        System Prompt Selection (for modality-aware styles):
+        - Image mode: Uses system[0] - optimized for single image understanding
+        - Video mode: Uses system[1] - optimized for temporal video processing
+        - Language mode: Uses system[2] - optimized for text-only conversation
+        
+        Message Processing:
+        - Handles tuple-format messages: (text, image_data, metadata)
+        - Strips and reformats <image> tokens based on model requirements
+        - Manages role alternation (user/assistant) with appropriate separators
+        - Applies model-specific token wrapping and formatting
+        
+        Separator Pattern Examples:
+        - TWO: "system###user: message###assistant: response###"
+        - Nemo: "[INST]system\\nmessage[/INST]response</s>"
+        - Qwen2p5: "<|im_start|>system\\nprompt<|im_end|>\\n<|im_start|>user\\nmessage<|im_end|>"
+        
+        Error Handling:
+        - Validates modality constraints for modality-aware separator styles
+        - Raises ValueError for unsupported separator styles
+        - Handles empty messages and incomplete conversations gracefully
+        
+        Special Features:
+        - MMTag support: Reformats image tags for models requiring structured multimodal input
+        - Message copying: Preserves original message structure when modifications needed
+        - Dynamic system prompt adaptation based on conversation content
+        """
         messages = self.messages
         if len(messages) > 0 and type(messages[0][1]) is tuple:
             messages = self.messages.copy()
